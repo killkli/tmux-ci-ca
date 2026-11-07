@@ -19,10 +19,10 @@ check() {
     shift 7
     local buffer out rc
     buffer=$(printf '%s\n' "$@")
-    out=$(LC_ALL=C "$AWK" -v scope="$scope" -v ochar="$open" -v cchar="$close" \
+    out=$(LC_ALL=C "$AWK" -v scope="$scope" -v opens="$open" -v closes="$close" \
         -v currow="$currow" -v curcx="$curcx" -f "$AWKFILE" <<< "$buffer")
     rc=$?
-    out=$(cut -d' ' -f1-5 <<< "$out")
+    out=$(head -1 <<< "$out" | cut -d' ' -f1-5)
     if [[ $expect == FAIL ]]; then
         if ((rc != 0)); then
             pass=$((pass + 1))

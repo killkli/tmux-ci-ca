@@ -6,8 +6,8 @@
 # coordinates, selection endpoints inclusive). Exits 1 with no output when
 # no enclosing pair exists or the inner region is empty.
 #
-# Variables: scope ("inner"|"around"), ochar, cchar, currow (absolute buffer
-# row of the copy-mode cursor), curcx (cursor cell column).
+# Variables: scope ("inner"|"around"), opens, closes (open/closer character
+# classes), currow (absolute buffer row), curcx (cursor cell column).
 #
 # Runs under LC_ALL=C: input is scanned bytewise and UTF-8 sequences are
 # grouped into characters with pure-arithmetic codepoint decoding, so any
@@ -16,7 +16,7 @@
 #
 # Matching is a port of the herdr implementation:
 # - brackets count nesting depth; already-matched pairs net out
-# - quotes (ochar == cchar) use vim semantics: a quote under the cursor
+# - quotes (opens == closes) use vim semantics: a quote under the cursor
 #   opens the region extending forward; otherwise the nearest quote
 #   backward opens the region extending forward
 # - the cursor on a pair character anchors the object directly
@@ -39,7 +39,7 @@ function char_width(code) {
         (code >= 127744 && code <= 129791) ||
         (code >= 11904 && code <= 12031) ||
         (code >= 12352 && code <= 12543) ||
-        (code >= 12784 && code <= 12799) ||
+        (code >= 12288 && code <= 12543) ||
         (code >= 19904 && code <= 42127) ||
         (code >= 43472 && code <= 43487) ||
         (code >= 63744 && code <= 64255) ||
@@ -83,15 +83,18 @@ function prev_char(at,    parts, li, ci) {
     }
 }
 
+function in_opens(ch) { return index(opens, ch) > 0 }
+function in_closes(ch) { return index(closes, ch) > 0 }
+
 function match_backward(li, ci,    ch, depth) {
     depth = 0
     for (;;) {
         while (ci > 0) {
             ci--
             ch = chtxt[li, ci]
-            if (ch == cchar) {
+            if (in_closes(ch)) {
                 depth++
-            } else if (ch == ochar) {
+            } else if (in_opens(ch)) {
                 if (depth == 0) return li SUBSEP ci
                 depth--
             }
@@ -106,18 +109,18 @@ function match_forward(okey,    parts, li, ci, ch, depth, quoted, count) {
     split(okey, parts, SUBSEP)
     li = parts[1]; ci = parts[2]
     depth = 0
-    quoted = (ochar == cchar)
+    quoted = (opens == closes)
     for (;;) {
         count = nchars[li]
         while (ci + 1 < count) {
             ci++
             ch = chtxt[li, ci]
-            if (quoted && ch == cchar) {
+            if (quoted && in_closes(ch)) {
                 return li SUBSEP ci
             }
-            if (ch == ochar) {
+            if (in_opens(ch)) {
                 depth++
-            } else if (ch == cchar) {
+            } else if (in_closes(ch)) {
                 if (depth == 0) return li SUBSEP ci
                 depth--
             }
@@ -132,7 +135,7 @@ function scan_backward(li, ci, want) {
     for (;;) {
         while (ci > 0) {
             ci--
-            if (chtxt[li, ci] == want) return li SUBSEP ci
+            if (in_closes(chtxt[li, ci])) return li SUBSEP ci
         }
         li--
         if (li < 0) return ""
@@ -145,7 +148,7 @@ BEGIN {
     for (ord_i = 1; ord_i <= 255; ord_i++)
         ORD[sprintf("%c", ord_i)] = ord_i
     nlines = 0
-    quoted = (ochar == cchar)
+    quoted = (opens == closes)
 }
 {
     row = nlines
@@ -193,12 +196,12 @@ END {
     open_at = ""
     if (pos > 0) {
         ch = chtxt[curli, pos - 1]
-        if (ch == ochar) open_at = curli SUBSEP (pos - 1)
-        else if (!quoted && ch == cchar)
+        if (in_opens(ch)) open_at = curli SUBSEP (pos - 1)
+        else if (!quoted && in_closes(ch))
             open_at = match_backward(curli, pos - 1)
     }
     if (open_at == "") {
-        if (quoted) open_at = scan_backward(curli, pos, ochar)
+        if (quoted) open_at = scan_backward(curli, pos)
         else open_at = match_backward(curli, pos)
     }
     if (open_at == "") exit 1
@@ -224,14 +227,12 @@ END {
     split(end, ep, SUBSEP)
     # inclusive last cell of the end char (a wide char owns its tail cell)
     endcell = chstart[ep[1], ep[2]] + chw[ep[1], ep[2]] - 1
-    # tmux cursor-right skips wide tails, so horizontal moves are counted in
-    # CHAR positions: rights to land on a cell = chars starting at/before it.
-    if (endcell + 1 < celllen[ep[1]]) {
-        # rights needed to rest the cursor on the cell after the end char
-        p2 = row_position(ep[1], endcell + 1) - 1
-    } else {
-        p2 = -1
-    }
+    # Horizontal positioning uses tmux search-forward-text, whose cursor
+    # lands one cell past the match end — exactly the half-open capture end.
+    # The search pattern is the target row's own text prefix, anchored by
+    # pre-positioning the cursor at that row's start (width-immune).
+    # P1/P2: cursor-right advances one character per call (wide glyphs span
+    # two cells), so rights to land on a char = its char index.
     print sp[1], chstart[sp[1], sp[2]], ep[1], endcell, celllen[ep[1]], \
-        row_position(sp[1], chstart[sp[1], sp[2]]) - 1, p2
+        sp[2], (endcell + 1 < celllen[ep[1]]) ? ep[2] + 1 : -1
 }

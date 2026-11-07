@@ -9,31 +9,26 @@
 #         it the script discovers the pane currently in copy mode (bindings
 #         pass no arguments: formats do not survive bind-key storage).
 #
-# The script reads the copy-mode cursor, captures the pane buffer, computes
-# the enclosed range with depth-counted bracket matching and vim quote
-# semantics over the full scrollback, then drives the tmux selection with
-# chained copy-mode commands.
+# Each pair-name maps to a CHARACTER CLASS: the ASCII pair and its CJK
+# fullwidth/curly twins are interchangeable, so ci( also matches （）,
+# ci" also matches “…” (curly quotes), ci[ also matches 【】.
 #
-# Options (tmux server options):
-#   @ci-ca-copy-on-select  "1" copies the selection and leaves copy mode
-#                          (default: select and stay, like vim visual mode)
-#   @ci-ca-notify          "1" shows a status message on failure (default)
+# The range is computed by a matcher over the captured pane buffer (full
+# scrollback) with nesting-depth counting, vim quote semantics and
+# fail-closed behavior. The selection is then driven through tmux's native
+# selection with vertical cursor chains plus horizontal search positioning
+# (search-forward-text is immune to wide-glyph cell math).
 #
-# Always exits 0 (tmux announces non-zero run-shell exits as an ugly
-# "returned 1" status message); failures are reported through a status
-# message via notify_fail instead.
+# Always exits 0: tmux announces non-zero run-shell exits as an ugly
+# "returned 1" status error; failures are reported through a status-line
+# message instead (set -g @ci-ca-notify "0" to silence).
+#
+# Written for bash 3.2 (macOS stock) — no associative arrays.
 
 set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AWK="${AWK:-awk}"
-
-discover_pane() {
-    # prefer the active pane of an active window among those in copy mode
-    tmux list-panes -a -F '#{pane_in_mode} #{window_active} #{pane_active} #{pane_id}' \
-        | awk '$1 == "1" { if ($2 == "1" && $3 == "1") print "0 " $4; else print "1 " $4 }' \
-        | sort | head -1 | cut -d' ' -f2-
-}
 
 notify_fail() {
     local reason=${1:-no enclosing ${SCOPE} ${PAIR} around cursor} notify
@@ -46,20 +41,25 @@ SCOPE=${1:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
 PAIR=${2:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
 PANE=${3:-}
 
+# opener/closer character classes (ASCII + CJK twins). Quote families count
+# parity over ALL their characters; curly-only strings would use direction.
 case $PAIR in
-    paren)   OPEN='(' CLOSE=')' ;;
-    brace)   OPEN='{' CLOSE='}' ;;
-    bracket) OPEN='[' CLOSE=']' ;;
-    angle)   OPEN='<' CLOSE='>' ;;
-    dq)      OPEN='"' CLOSE='"' ;;
-    sq)      OPEN="'" CLOSE="'" ;;
-    bt)      OPEN='`' CLOSE='`' ;;
-    *) printf 'unknown pair: %s\n' "$PAIR" >&2; exit 2 ;;
+    paren)   OPENS="(（"    CLOSES=")）" ;;
+    brace)   OPENS="{｛"    CLOSES="}｝" ;;
+    bracket) OPENS="[［【"  CLOSES="]］】" ;;
+    angle)   OPENS="<〈《"  CLOSES=">〉》" ;;
+    dq)      OPENS='"“＂”' CLOSES='"“＂”' ;;
+    sq)      OPENS="'‘’"    CLOSES="'‘’" ;;
+    bt)      OPENS='`'      CLOSES='`' ;;
+    *) printf 'unknown pair: %s\n' "$PAIR" >&2; exit 0 ;;
 esac
 
 # --- resolve the pane ---------------------------------------------------
 if [[ -z $PANE ]]; then
-    PANE=$(discover_pane)
+    # prefer the active pane of an active window among those in copy mode
+    PANE=$(tmux list-panes -a -F '#{pane_in_mode} #{window_active} #{pane_active} #{pane_id}' \
+        | awk '$1 == "1" { if ($2 == "1" && $3 == "1") print "0 " $4; else print "1 " $4 }' \
+        | sort | head -1 | cut -d' ' -f2-)
 fi
 [[ -n $PANE ]] || {
     notify_fail "no pane in copy mode"
@@ -83,31 +83,32 @@ H=${H:-0}
 ABS_ROW=$((HIST - SP + CY))
 
 # --- compute the range --------------------------------------------------
-MATCHED=$(LC_ALL=C "$AWK" -v scope="$SCOPE" -v ochar="$OPEN" -v cchar="$CLOSE" \
+MATCHED=$(LC_ALL=C "$AWK" -v scope="$SCOPE" -v opens="$OPENS" -v closes="$CLOSES" \
     -v currow="$ABS_ROW" -v curcx="$CX" -f "$DIR/surround.awk" \
     <<< "$(tmux capture-pane -p -S - -E - -t "$PANE")") || {
-    notify_fail "no enclosing ${SCOPE} ${PAIR} around cursor"
+    notify_fail
     exit 0
 }
-[[ -n ${MATCHED:-} ]] || {
-    notify_fail "no enclosing ${SCOPE} ${PAIR} around cursor"
-    exit 0
-}
-read -r R1 _C1 R2 _C2 _ENDLEN P1 P2 <<< "$MATCHED"
+read -r R1 C1 R2 C2 ENDLEN P1 P2 <<< "$MATCHED"
 
 # --- drive the selection ------------------------------------------------
-# tmux selection captures the half-open range [anchor, cursor): the cursor
-# must rest one cell past the last included cell. end-of-line rests on the
-# virtual end-of-line position, which includes the final cell.
-#
-# Vertical movement chains cursor-down/up from the cheaper anchor
-# (history-top / history-bottom / current cursor). Horizontal movement
-# chains cursor-right from start-of-line. Commands are batched into a few
-# tmux invocations separated by ";" so latency stays flat.
+# tmux selection captures the half-open range [anchor, cursor). Horizontal
+# positioning uses search-forward-text, whose cursor lands one cell past
+# the match end — exactly the half-open capture end — and is immune to
+# wide-glyph cell math. Vertical positioning chains cursor-down/up from the
+# cheapest anchor (history-top / history-bottom / current cursor). Commands
+# are batched into a few tmux invocations separated by ";". Search patterns
+# are tmux-quoted: the CLI re-parses argv, so spaces, quotes and
+# backslashes in pane text must be escaped or the pattern splits apart.
 
 CUR_ROW=$ABS_ROW
 TOTAL=$((HIST + H))
 ARGS=()
+
+tq() { # quote a string for tmux's command tokenizer (double-quoted form)
+    local s=${1//'\'/'\\'}
+    printf '"%s"' "${s//'"'/'\"'}"
+}
 
 flush() {
     if ((${#ARGS[@]} > 0)); then
@@ -121,7 +122,6 @@ x() {
 }
 
 cmd() {
-    # tmux command separator between chained groups
     if ((${#ARGS[@]} > 0)); then
         ARGS+=(";")
     fi
@@ -157,7 +157,9 @@ goto_row() {
     CUR_ROW=$target
 }
 
-# start point (cursor-right steps over chars, not cells)
+# Start point: vertical chain to the row, then char-step to the column.
+# cursor-right advances one character per call (wide glyphs span two cells),
+# so the step count is the character index from the matcher.
 goto_row "$R1"
 x start-of-line
 n=$P1
@@ -165,7 +167,8 @@ while ((n--)); do x cursor-right
 done
 x begin-selection
 
-# end point (cursor rests one past the last included cell)
+# End point: char-step past the last included cell (or to the virtual
+# end-of-line when the pair ends the row).
 goto_row "$R2"
 x start-of-line
 if ((P2 >= 0)); then

@@ -8,13 +8,18 @@ for `y` / Enter exactly like any `v` selection.
 
 ## Supported pairs
 
-| keys | pair |
+| keys | pair (ASCII + CJK twins) |
 |---|---|
-| `(` `)` `b` | parentheses |
-| `{` `}` `B` | braces |
-| `[` `]` | square brackets |
-| `<` `>` | angle brackets |
-| `"` `'` `` ` `` | quotes |
+| `(` `)` `b` | `()` 與全形 `（）` |
+| `{` `}` `B` | `{}` 與全形 `｛｝` |
+| `[` `]` | `[]`、全形 `［］` 與中式 `【】` |
+| `<` `>` | `<>`、`〈〉` 與 `《》` |
+| `"` | `"` 與彎引號 `“…”` |
+| `'` | `'` 與 `‘…’` |
+| `` ` `` | backtick |
+
+CJK 全形/彎引號字元與 ASCII 配對在同一族內可互換：游標在 `（…）` 內按
+`ci(` 會選到全形括號的內容。
 
 ## Why this is different from keybind-only approaches
 

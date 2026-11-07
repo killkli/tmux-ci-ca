@@ -19,7 +19,9 @@
 #                          (default: select and stay, like vim visual mode)
 #   @ci-ca-notify          "1" shows a status message on failure (default)
 #
-# Exit codes: 0 matched and selection driven; 1 no enclosing pair.
+# Always exits 0 (tmux announces non-zero run-shell exits as an ugly
+# "returned 1" status message); failures are reported through a status
+# message via notify_fail instead.
 
 set -u
 
@@ -34,14 +36,14 @@ discover_pane() {
 }
 
 notify_fail() {
-    local notify
+    local reason=${1:-no enclosing ${SCOPE} ${PAIR} around cursor} notify
+    echo "tmux-ci-ca: $reason"
     notify=$(tmux show-options -gv '@ci-ca-notify' 2>/dev/null || true)
-    [[ $notify == 0 ]] || tmux display-message -t "$PANE" \
-        "tmux-ci-ca: no enclosing ${SCOPE} ${PAIR} around cursor"
+    [[ $notify == 0 ]] || tmux display-message -t "$PANE" "tmux-ci-ca: $reason"
 }
 
-SCOPE=${1:?(usage: ci-ca.sh <inner|around> <pair-name> [pane])}
-PAIR=${2:?}
+SCOPE=${1:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
+PAIR=${2:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
 PANE=${3:-}
 
 case $PAIR in
@@ -59,13 +61,22 @@ esac
 if [[ -z $PANE ]]; then
     PANE=$(discover_pane)
 fi
-[[ -n $PANE ]] || { notify_fail; exit 1; }
+[[ -n $PANE ]] || {
+    notify_fail "no pane in copy mode"
+    exit 0
+}
 
 # --- read copy-mode state ----------------------------------------------
 IFS=, read -r CX CY SP HIST H \
     <<< "$(tmux display-message -p -t "$PANE" \
-        '#{copy_cursor_x},#{copy_cursor_y},#{scroll_position},#{history_size},#{pane_height}')" || exit 1
-[[ ${CX:-} =~ ^[0-9]+$ && ${CY:-} =~ ^[0-9]+$ ]] || exit 1
+        '#{copy_cursor_x},#{copy_cursor_y},#{scroll_position},#{history_size},#{pane_height}')" || {
+    notify_fail "pane is not in copy mode"
+    exit 0
+}
+[[ ${CX:-} =~ ^[0-9]+$ && ${CY:-} =~ ^[0-9]+$ ]] || {
+    notify_fail "pane is not in copy mode"
+    exit 0
+}
 HIST=${HIST:-0}
 SP=${SP:-0}
 H=${H:-0}
@@ -74,8 +85,14 @@ ABS_ROW=$((HIST - SP + CY))
 # --- compute the range --------------------------------------------------
 MATCHED=$(LC_ALL=C "$AWK" -v scope="$SCOPE" -v ochar="$OPEN" -v cchar="$CLOSE" \
     -v currow="$ABS_ROW" -v curcx="$CX" -f "$DIR/surround.awk" \
-    <<< "$(tmux capture-pane -p -S - -E - -t "$PANE")") || exit 1
-[[ -n ${MATCHED:-} ]] || { notify_fail; exit 1; }
+    <<< "$(tmux capture-pane -p -S - -E - -t "$PANE")") || {
+    notify_fail "no enclosing ${SCOPE} ${PAIR} around cursor"
+    exit 0
+}
+[[ -n ${MATCHED:-} ]] || {
+    notify_fail "no enclosing ${SCOPE} ${PAIR} around cursor"
+    exit 0
+}
 read -r R1 _C1 R2 _C2 _ENDLEN P1 P2 <<< "$MATCHED"
 
 # --- drive the selection ------------------------------------------------

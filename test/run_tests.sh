@@ -115,11 +115,12 @@ LAST=$(printf '%s\n' "$SEL" | tail -1)
 [[ $rc == 0 && $LINES == 10 && $FIRST == 'top' && $LAST == 'mid' ]] && ok || bad "ci( scrollback span" "lines=$LINES first=$FIRST last=$LAST (rc=$rc)" '10 lines top..mid'
 
 # --- scenario 6: no pair fails closed ------------------------------------
+# --- scenario 6: no pair fails closed with a status hint -----------------
 PANE=$(new_pane 'printf "nothing here\n"')
 enter_copy
 pos 0 4
-run_ca inner paren; rc=$?
-[[ $rc == 1 ]] && ok || bad "no pair exit code" "rc=$rc" 'rc=1'
+OUT=$(run_ca inner paren); rc=$?
+[[ $rc == 0 && $OUT == *'no enclosing inner paren'* ]] && ok || bad "no pair status hint" "$OUT (rc=$rc)" 'no enclosing hint'
 
 # --- scenario 6b: pane discovery (binding passes no pane id) --------------
 PANE=$(new_pane 'printf "say \"found by discovery\" done\n"')
@@ -133,8 +134,8 @@ SEL=$(selection)
 PANE=$(new_pane 'printf "empty () pair\n"')
 enter_copy
 pos 0 9
-run_ca inner paren; rc=$?
-[[ $rc == 1 ]] && ok || bad "empty inner exit code" "rc=$rc" 'rc=1'
+OUT=$(run_ca inner paren); rc=$?
+[[ $rc == 0 && $OUT == *'no enclosing inner paren'* ]] && ok || bad "empty inner status hint" "$OUT (rc=$rc)" 'no enclosing hint'
 
 # --- scenario 8: wide characters -----------------------------------------
 PANE=$(new_pane 'printf "中文 \"內容測試\" 結束\n"')

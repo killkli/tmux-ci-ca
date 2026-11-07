@@ -31,8 +31,9 @@ and drives tmux's selection with exact cursor navigation:
   extending forward; otherwise the nearest quote backward opens it
 - pairs may span soft-wrapped rows and blank lines
 - wide glyphs (CJK, emoji) count as two cells; combining marks are skipped
-- fail closed: no enclosing pair or an empty inner region does nothing
-  (optionally a status message)
+- fail closed: no enclosing pair or an empty inner region leaves the
+  selection untouched and shows a status-line hint (move the cursor inside
+  the pair first — e.g. with `/search` or `hjkl` — then press ci/ca again)
 
 ## Install
 

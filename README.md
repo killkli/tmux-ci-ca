@@ -39,7 +39,7 @@ and drives tmux's selection with exact cursor navigation:
 ### With TPM
 
 ```tmux
-set -g @plugin '<you>/tmux-ci-ca'
+set -g @plugin 'killkli/tmux-ci-ca'
 ```
 
 ### Manual (no TPM)

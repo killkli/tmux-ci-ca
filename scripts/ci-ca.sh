@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 # tmux-ci-ca: complete vim-style ci/ca text objects for tmux copy mode.
 #
-# Usage: ci-ca.sh <scope> <pair-name> [pane]
+# Usage: ci-ca.sh <scope> <pair-name> <pane>
 #   scope: "inner" (ci) or "around" (ca)
-#   pair-name: paren brace bracket angle dq sq bt (shell-safe words so the
-#              binding survives tmux's command re-parser and sh -c)
-#   pane: optional pane id in the form %N, currently in copy mode. Without
-#         it the script discovers the pane currently in copy mode (bindings
-#         pass no arguments: formats do not survive bind-key storage).
+#   pair-name: paren brace bracket angle dq sq bt
+#   pane: the pane ID resolved by tmux at the keypress
 #
 # Each pair-name maps to a CHARACTER CLASS: the ASCII pair and its CJK
 # fullwidth/curly twins are interchangeable, so ci( also matches （）,
@@ -16,30 +13,38 @@
 # The range is computed by a matcher over the captured pane buffer (full
 # scrollback) with nesting-depth counting, vim quote semantics and
 # fail-closed behavior. The selection is then driven through tmux's native
-# selection with vertical cursor chains plus horizontal search positioning
-# (search-forward-text is immune to wide-glyph cell math).
+# selection with vertical and horizontal cursor navigation.
 #
-# Always exits 0: tmux announces non-zero run-shell exits as an ugly
-# "returned 1" status error; failures are reported through a status-line
-# message instead (set -g @ci-ca-notify "0" to silence).
+# Expected failures are reported through a status-line message instead of
+# writing to stdout, which would open a separate tmux view-mode pane.
 #
 # Written for bash 3.2 (macOS stock) — no associative arrays.
 
 set -u
+set -o pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AWK="${AWK:-awk}"
 
 notify_fail() {
     local reason=${1:-no enclosing ${SCOPE} ${PAIR} around cursor} notify
-    echo "tmux-ci-ca: $reason"
     notify=$(tmux show-options -gv '@ci-ca-notify' 2>/dev/null || true)
-    [[ $notify == 0 ]] || tmux display-message -t "$PANE" "tmux-ci-ca: $reason"
+    if [[ $notify != 0 ]]; then
+        tmux display-message -t "$PANE" "tmux-ci-ca: $reason" 2>/dev/null || true
+    fi
 }
 
-SCOPE=${1:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
-PAIR=${2:?usage: ci-ca.sh <inner|around> <pair-name> [pane]}
-PANE=${3:-}
+if (($# != 3)); then
+    tmux display-message "tmux-ci-ca: invalid invocation" 2>/dev/null || true
+    exit 0
+fi
+SCOPE=$1
+PAIR=$2
+PANE=$3
+if [[ ! $PANE =~ ^%[0-9]+$ ]]; then
+    tmux display-message "tmux-ci-ca: invalid pane" 2>/dev/null || true
+    exit 0
+fi
 
 # opener/closer character classes (ASCII + CJK twins). Quote families count
 # parity over ALL their characters; curly-only strings would use direction.
@@ -51,29 +56,22 @@ case $PAIR in
     dq)      OPENS='"“＂”' CLOSES='"“＂”' ;;
     sq)      OPENS="'‘’"    CLOSES="'‘’" ;;
     bt)      OPENS='`'      CLOSES='`' ;;
-    *) printf 'unknown pair: %s\n' "$PAIR" >&2; exit 0 ;;
+    *) notify_fail "unknown pair: $PAIR"; exit 0 ;;
 esac
 
-# --- resolve the pane ---------------------------------------------------
-if [[ -z $PANE ]]; then
-    # prefer the active pane of an active window among those in copy mode
-    PANE=$(tmux list-panes -a -F '#{pane_in_mode} #{window_active} #{pane_active} #{pane_id}' \
-        | awk '$1 == "1" { if ($2 == "1" && $3 == "1") print "0 " $4; else print "1 " $4 }' \
-        | sort | head -1 | cut -d' ' -f2-)
-fi
-[[ -n $PANE ]] || {
-    notify_fail "no pane in copy mode"
-    exit 0
-}
+case $SCOPE in
+    inner|around) ;;
+    *) notify_fail "invalid selection scope"; exit 0 ;;
+esac
 
 # --- read copy-mode state ----------------------------------------------
-IFS=, read -r CX CY SP HIST H \
+IFS=, read -r CX CY SP HIST H IN_MODE \
     <<< "$(tmux display-message -p -t "$PANE" \
-        '#{copy_cursor_x},#{copy_cursor_y},#{scroll_position},#{history_size},#{pane_height}')" || {
+        '#{copy_cursor_x},#{copy_cursor_y},#{scroll_position},#{history_size},#{pane_height},#{pane_in_mode}')" || {
     notify_fail "pane is not in copy mode"
     exit 0
 }
-[[ ${CX:-} =~ ^[0-9]+$ && ${CY:-} =~ ^[0-9]+$ ]] || {
+[[ ${IN_MODE:-0} == 1 && ${CX:-} =~ ^[0-9]+$ && ${CY:-} =~ ^[0-9]+$ ]] || {
     notify_fail "pane is not in copy mode"
     exit 0
 }
@@ -82,37 +80,91 @@ SP=${SP:-0}
 H=${H:-0}
 ABS_ROW=$((HIST - SP + CY))
 
-# --- compute the range --------------------------------------------------
-MATCHED=$(LC_ALL=C "$AWK" -v scope="$SCOPE" -v opens="$OPENS" -v closes="$CLOSES" \
-    -v currow="$ABS_ROW" -v curcx="$CX" -f "$DIR/surround.awk" \
-    <<< "$(tmux capture-pane -p -S - -E - -t "$PANE")") || {
-    notify_fail
-    exit 0
-}
-read -r R1 C1 R2 C2 ENDLEN P1 P2 <<< "$MATCHED"
+# tmux's treatment of combined emoji changed across releases.
+ZWJ=0
+ZWJ_ASCII=0
+MODIFIERS=0
+VARIATION_WIDE=0
+VERSION=$(tmux display-message -p -t "$PANE" '#{version}')
+if [[ $VERSION =~ ^([0-9]+)\.([0-9]+) ]]; then
+    MAJOR=${BASH_REMATCH[1]}
+    MINOR=${BASH_REMATCH[2]}
+    if ((MAJOR > 3 || (MAJOR == 3 && MINOR >= 3))); then
+        ZWJ=1
+        if ((MAJOR == 3 && MINOR == 3)); then ZWJ_ASCII=1; fi
+    fi
+    if ((MAJOR > 3 || (MAJOR == 3 && MINOR >= 4))); then
+        MODIFIERS=1
+        VARIATION_WIDE=1
+        case $(tmux show-options -sqv variation-selector-always-wide 2>/dev/null) in
+            off|0) VARIATION_WIDE=0 ;;
+        esac
+    fi
+    if ((MAJOR == 3 && MINOR == 6)); then
+        # 3.6a fixed the order in which skin-tone modifiers are combined.
+        if [[ $VERSION == 3.6 ]]; then MODIFIERS=3; else MODIFIERS=4; fi
+    elif ((MAJOR > 3 || (MAJOR == 3 && MINOR >= 7))); then
+        MODIFIERS=2
+    fi
+fi
 
-# --- drive the selection ------------------------------------------------
-# tmux selection captures the half-open range [anchor, cursor). Horizontal
-# positioning uses search-forward-text, whose cursor lands one cell past
-# the match end — exactly the half-open capture end — and is immune to
-# wide-glyph cell math. Vertical positioning chains cursor-down/up from the
-# cheapest anchor (history-top / history-bottom / current cursor). Commands
-# are batched into a few tmux invocations separated by ";". Search patterns
-# are tmux-quoted: the CLI re-parses argv, so spaces, quotes and
-# backslashes in pane text must be escaped or the pattern splits apart.
+# Newer tmux can capture the copy-mode snapshot itself. Its history size
+# stays fixed even if the underlying program continues producing output.
+SNAPSHOT=0
+CAPTURE=(-p -S - -E - -t "$PANE")
+case $(tmux list-commands capture-pane 2>/dev/null) in
+    *M*) CAPTURE+=(-M); SNAPSHOT=1 ;;
+esac
+if MATCHED=$(tmux capture-pane "${CAPTURE[@]}" 2>/dev/null |
+    LC_ALL=C "$AWK" -v scope="$SCOPE" -v opens="$OPENS" -v closes="$CLOSES" \
+        -v currow="$ABS_ROW" -v curcx="$CX" -v snapshot="$SNAPSHOT" \
+        -v height="$H" -v scroll="$SP" -v cursory="$CY" -v pane="$PANE" \
+        -v history="$HIST" -v zwj="$ZWJ" -v zwj_ascii="$ZWJ_ASCII" \
+        -v modifiers="$MODIFIERS" -v variation_wide="$VARIATION_WIDE" \
+        -f "$DIR/surround.awk" 2>/dev/null); then
+    :
+else
+    status=$?
+    if ((status == 1)); then
+        notify_fail
+    else
+        notify_fail "unable to match pane text (exit $status)"
+    fi
+    exit 0
+fi
+read -r R1 C1 R2 C2 ENDLEN P1 P2 OPEN_ROW OPEN_INDEX CLOSE_ROW CLOSE_INDEX ROWS ONLY_BOUNDARIES <<< "$MATCHED"
+if ((SNAPSHOT)); then
+    HIST=$((ROWS - H))
+    ABS_ROW=$((HIST - SP + CY))
+fi
+
+if ((ONLY_BOUNDARIES)); then
+    # capture-pane -J joins soft wraps but retains hard newlines. A pair
+    # split only by a soft wrap has no inner text and must fail closed.
+    JOINED_ARGS=(-p -J -S "$((OPEN_ROW - HIST))" -E "$((CLOSE_ROW - HIST))" -t "$PANE")
+    if ((SNAPSHOT)); then JOINED_ARGS+=(-M); fi
+    if ! JOINED=$(tmux capture-pane "${JOINED_ARGS[@]}" 2>/dev/null); then
+        notify_fail "unable to read copy mode"
+        exit 0
+    fi
+    if [[ $JOINED != *$'\n'* ]]; then
+        notify_fail
+        exit 0
+    fi
+fi
+
+# tmux's vi-mode selection includes both the anchor and the cursor.
+# Vertical positioning uses the cheapest of the current row, history-top,
+# and history-bottom, then positions on each physical row.
 
 CUR_ROW=$ABS_ROW
 TOTAL=$((HIST + H))
 ARGS=()
 
-tq() { # quote a string for tmux's command tokenizer (double-quoted form)
-    local s=${1//'\'/'\\'}
-    printf '"%s"' "${s//'"'/'\"'}"
-}
-
 flush() {
-    if ((${#ARGS[@]} > 0)); then
-        tmux "${ARGS[@]}"
+    if ((${#ARGS[@]} > 0)) && ! tmux "${ARGS[@]}" 2>/dev/null; then
+        notify_fail "unable to apply selection"
+        exit 0
     fi
     ARGS=()
 }
@@ -147,36 +199,82 @@ goto_row() {
         d=$((target - CUR_ROW))
     fi
     if ((d > 0)); then
-        while ((d--)); do x cursor-down
-        done
+        x -N "$d" cursor-down
     elif ((d < 0)); then
-        d=$((-d))
-        while ((d--)); do x cursor-up
-        done
+        x -N "$((-d))" cursor-up
     fi
     CUR_ROW=$target
 }
 
-# Start point: vertical chain to the row, then char-step to the column.
-# cursor-right advances one character per call (wide glyphs span two cells),
-# so the step count is the character index from the matcher.
-goto_row "$R1"
-x start-of-line
-n=$P1
-while ((n--)); do x cursor-right
-done
-x begin-selection
+current_row() {
+    local y scroll
+    IFS=, read -r y scroll <<< "$(tmux display-message -p -t "$PANE" \
+        '#{copy_cursor_y},#{scroll_position}')"
+    if [[ ! $y =~ ^[0-9]+$ || ! $scroll =~ ^[0-9]+$ ]]; then
+        notify_fail "unable to position selection"
+        exit 0
+    fi
+    CURRENT_ACTUAL_ROW=$((HIST - scroll + y))
+}
 
-# End point: char-step past the last included cell (or to the virtual
-# end-of-line when the pair ends the row).
-goto_row "$R2"
-x start-of-line
-if ((P2 >= 0)); then
-    n=$P2
-    while ((n--)); do x cursor-right
-    done
+position() {
+    local target=$1 offset=$2
+    goto_row "$target"
+    # start-of-line moves to the start of the logical line, which may be
+    # several physical rows above a soft wrap. Return to the requested row
+    # at column zero before taking character steps.
+    x start-of-line
+    flush
+    current_row
+    if ((CURRENT_ACTUAL_ROW > target)); then
+        notify_fail "unable to position selection"
+        exit 0
+    fi
+    if ((CURRENT_ACTUAL_ROW < target)); then
+        x -N "$((target - CURRENT_ACTUAL_ROW))" cursor-down
+    fi
+    if ((offset > 0)); then
+        x -N "$offset" cursor-right
+    fi
+    CUR_ROW=$target
+}
+# Text objects are characterwise, regardless of an earlier rectangle toggle.
+x rectangle-off
+
+if [[ $SCOPE == inner ]] && ((OPEN_ROW != CLOSE_ROW)); then
+    # Emacs-mode cursor movement can address the virtual cell at a hard
+    # line ending. It lets us include newlines immediately inside a pair;
+    # vi-mode movement otherwise jumps over those cells. Restore the exact
+    # window option (including inheritance) before the user copies.
+    LOCAL_MODE=$(tmux show-options -wqv -t "$PANE" mode-keys 2>/dev/null || true)
+    restore_mode() {
+        if [[ -n $LOCAL_MODE ]]; then
+            tmux set-option -w -t "$PANE" mode-keys "$LOCAL_MODE" 2>/dev/null || true
+        else
+            tmux set-option -wu -t "$PANE" mode-keys 2>/dev/null || true
+        fi
+    }
+    if ! tmux set-option -w -t "$PANE" mode-keys emacs 2>/dev/null; then
+        notify_fail "unable to position selection"
+        exit 0
+    fi
+    trap restore_mode EXIT
+    trap 'exit 0' HUP INT TERM
+    position "$OPEN_ROW" "$OPEN_INDEX"
+    x cursor-right
+    x begin-selection
+    flush
+    current_row
+    CUR_ROW=$CURRENT_ACTUAL_ROW
+    position "$CLOSE_ROW" "$CLOSE_INDEX"
+    x cursor-left
+    flush
+    restore_mode
+    trap - EXIT HUP INT TERM
 else
-    x end-of-line
+    position "$R1" "$P1"
+    x begin-selection
+    position "$R2" "$P2"
 fi
 
 flush

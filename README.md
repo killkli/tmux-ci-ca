@@ -2,6 +2,8 @@
 
 Complete vim-style `ci` / `ca` enclosed-text selection for **tmux copy mode**.
 
+![tmux-ci-ca demo](assets/demo.gif)
+
 Enable vi copy-mode keys, enter copy mode (`prefix + [`), and move the cursor
 onto or inside a pair. Press `c`, then `i` (inner) or `a` (around), then the
 pair character. For example, `ci(` selects the text inside parentheses and

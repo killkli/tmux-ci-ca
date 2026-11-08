@@ -50,7 +50,7 @@ run '~/.tmux/plugins/tpm/tpm'
 tmux source-file ~/.tmux.conf
 ```
 
-接著按 tmux 的 prefix，再按大寫 `I`（預設是 `Ctrl-b`，接著 `Shift-i`），由 TPM 安裝外掛。若尚未啟動 tmux，先執行 `tmux` 進入後再操作。
+接著按 tmux 的 prefix，再按大寫 `I`（預設是 `Ctrl-b`，接著 `Shift-i`），由 TPM 安裝外掛。等待安裝完成，出現 `Done, press ENTER to continue` 時按 Enter 返回。若尚未啟動 tmux，先執行 `tmux` 進入後再操作。
 
 ## 方法二：手動安裝
 
